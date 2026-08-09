@@ -1,0 +1,23 @@
+[Unit]
+Description=Firewall Panel - firewalld tray monitor and control panel
+Documentation=man:firewalld(1)
+# This is a session-scoped tray applet, not a system daemon: it needs the
+# user's Wayland/X11 socket and the session polkit agent, so it belongs to
+# the graphical session and dies with it.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/fwpanel --hidden
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=10s
+Slice=app.slice
+# The panel itself needs no privileges; it talks to firewalld over D-Bus and
+# asks polkit for anything that is not read-only.
+NoNewPrivileges=no
+PrivateTmp=no
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Firewall Panel
+GenericName=Firewall Control Panel
+Comment=Monitor and configure the firewalld firewall
+Exec=fwpanel
+Icon=fwpanel
+Terminal=false
+Categories=System;Security;Qt;KDE;
+Keywords=firewall;firewalld;security;network;nftables;iptables;ports;zones;
+StartupNotify=true
+StartupWMClass=fwpanel
+X-KDE-StartupNotify=true
+X-GNOME-UsesNotifications=true

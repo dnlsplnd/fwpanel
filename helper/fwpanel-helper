@@ -1,0 +1,301 @@
+#!/usr/bin/python3
+"""Privileged read-only helper for fwpanel.
+
+Launched once per session through pkexec. Speaks newline-delimited JSON on
+stdin/stdout and exits as soon as stdin closes, so it cannot outlive the panel.
+
+It exposes a closed set of read-only commands. No argument from the caller is
+ever interpolated into a path or a command line: the request carries a command
+name and nothing else, and unknown names are rejected. The helper never writes
+to the firewall - all mutation goes through firewalld's own polkit-checked
+D-Bus API from the unprivileged GUI.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+
+VERSION = "1.0.0"
+
+CONNTRACK_PATH = "/proc/net/nf_conntrack"
+CONNTRACK_LIMIT = 8000
+SOCKET_LIMIT = 8000
+
+# Kernel log prefixes firewalld uses when LogDenied is enabled.
+DENIED_PATTERN = re.compile(
+    r"(_DROP|_REJECT|_DENY|STATE_INVALID_DROP|FINAL_REJECT|filter_.*_(DROP|REJECT))"
+)
+
+
+def run(argv: list[str], timeout: int = 15) -> str:
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "").strip()[:400]
+                           or f"{argv[0]} exited {proc.returncode}")
+    return proc.stdout
+
+
+# --------------------------------------------------------------------------
+# commands
+# --------------------------------------------------------------------------
+def cmd_ping() -> dict:
+    return {"version": VERSION, "uid": os.getuid(), "pid": os.getpid()}
+
+
+def _kv_pairs(tokens: list[str]) -> list[tuple[str, str]]:
+    out = []
+    for tok in tokens:
+        if "=" in tok:
+            key, _, value = tok.partition("=")
+            out.append((key, value))
+    return out
+
+
+def cmd_conntrack() -> dict:
+    """Parse /proc/net/nf_conntrack into structured flows."""
+    entries = []
+    truncated = False
+    try:
+        with open(CONNTRACK_PATH, "r", errors="replace") as handle:
+            for count, line in enumerate(handle):
+                if count >= CONNTRACK_LIMIT:
+                    truncated = True
+                    break
+                tokens = line.split()
+                if len(tokens) < 5:
+                    continue
+                family = tokens[0]
+                proto = tokens[2]
+                try:
+                    timeout = int(tokens[4])
+                except ValueError:
+                    timeout = 0
+                state = ""
+                if len(tokens) > 5 and "=" not in tokens[5] and not tokens[5].startswith("["):
+                    state = tokens[5]
+
+                orig: dict[str, str] = {}
+                reply: dict[str, str] = {}
+                # src/dst/sport/dport (and packets/bytes when accounting is on)
+                # appear twice per line: original direction, then reply.
+                for key, value in _kv_pairs(tokens):
+                    (reply if key in orig else orig)[key] = value
+
+                entries.append({
+                    "family": family,
+                    "proto": proto,
+                    "timeout": timeout,
+                    "state": state,
+                    "src": orig.get("src", ""),
+                    "dst": orig.get("dst", ""),
+                    "sport": orig.get("sport", ""),
+                    "dport": orig.get("dport", ""),
+                    "reply_src": reply.get("src", ""),
+                    "reply_dst": reply.get("dst", ""),
+                    "packets": int(orig.get("packets", 0) or 0),
+                    "bytes": int(orig.get("bytes", 0) or 0),
+                    "reply_packets": int(reply.get("packets", 0) or 0),
+                    "reply_bytes": int(reply.get("bytes", 0) or 0),
+                    "assured": "[ASSURED]" in line,
+                    "mark": orig.get("mark", "0"),
+                })
+    except FileNotFoundError:
+        return {"entries": [], "truncated": False,
+                "error": "nf_conntrack is not loaded"}
+    except PermissionError as exc:
+        return {"entries": [], "truncated": False, "error": str(exc)}
+
+    stats = {}
+    for name in ("nf_conntrack_count", "nf_conntrack_max"):
+        try:
+            with open(f"/proc/sys/net/netfilter/{name}") as handle:
+                stats[name] = int(handle.read().strip())
+        except (OSError, ValueError):
+            stats[name] = 0
+    return {"entries": entries, "truncated": truncated, "stats": stats}
+
+
+_USERS_RE = re.compile(r'\("(?P<name>[^"]+)",pid=(?P<pid>\d+),fd=(?P<fd>\d+)\)')
+
+
+def _split_endpoint(text: str) -> tuple[str, str]:
+    """Split ss's addr:port form, tolerating IPv6 and %iface suffixes."""
+    if text in ("*:*", "*"):
+        return "*", "*"
+    addr, _, port = text.rpartition(":")
+    addr = addr.strip("[]")
+    return addr or "*", port or "*"
+
+
+def cmd_sockets() -> dict:
+    """Every inet socket with its owning process (root sees all users)."""
+    try:
+        raw = run(["ss", "-tuwnaHOp"])
+    except Exception:
+        raw = run(["ss", "-tunaHp"])
+
+    rows = []
+    for count, line in enumerate(raw.splitlines()):
+        if count >= SOCKET_LIMIT:
+            break
+        parts = line.split(maxsplit=6)
+        if len(parts) < 5:
+            continue
+        netid, state, recvq, sendq, local = parts[:5]
+        peer = parts[5] if len(parts) > 5 else "*:*"
+        extra = parts[6] if len(parts) > 6 else ""
+        laddr, lport = _split_endpoint(local)
+        raddr, rport = _split_endpoint(peer)
+        procs = [{"name": m.group("name"), "pid": int(m.group("pid"))}
+                 for m in _USERS_RE.finditer(extra)]
+        rows.append({
+            "proto": netid,
+            "state": state,
+            "recvq": int(recvq) if recvq.isdigit() else 0,
+            "sendq": int(sendq) if sendq.isdigit() else 0,
+            "laddr": laddr, "lport": lport,
+            "raddr": raddr, "rport": rport,
+            "procs": procs,
+        })
+    return {"sockets": rows}
+
+
+def cmd_nft() -> dict:
+    """Raw nftables ruleset, both rendered text and parsed JSON."""
+    text = ""
+    parsed = None
+    try:
+        text = run(["nft", "-nn", "list", "ruleset"])
+    except Exception as exc:
+        text = f"# nft list ruleset failed: {exc}"
+    try:
+        parsed = json.loads(run(["nft", "-j", "-nn", "list", "ruleset"]))
+    except Exception:
+        parsed = None
+    return {"text": text, "json": parsed}
+
+
+def cmd_nft_counters() -> dict:
+    """Per-chain packet/byte counters, so the GUI can chart drop rates."""
+    try:
+        doc = json.loads(run(["nft", "-j", "-nn", "list", "ruleset"]))
+    except Exception as exc:
+        return {"chains": [], "error": str(exc)}
+
+    chains: dict[str, dict] = {}
+    for item in doc.get("nftables", []):
+        rule = item.get("rule")
+        if not rule:
+            continue
+        key = f"{rule.get('family')}/{rule.get('table')}/{rule.get('chain')}"
+        slot = chains.setdefault(key, {
+            "family": rule.get("family", ""), "table": rule.get("table", ""),
+            "chain": rule.get("chain", ""), "packets": 0, "bytes": 0,
+            "drop_packets": 0, "drop_bytes": 0, "rules": 0,
+        })
+        slot["rules"] += 1
+        verdict = ""
+        counter = None
+        for expr in rule.get("expr", []):
+            if "counter" in expr:
+                counter = expr["counter"]
+            for word in ("drop", "reject"):
+                if word in expr:
+                    verdict = word
+            accept = expr.get("accept")
+            if accept is not None:
+                verdict = verdict or "accept"
+        if counter:
+            slot["packets"] += int(counter.get("packets", 0))
+            slot["bytes"] += int(counter.get("bytes", 0))
+            if verdict in ("drop", "reject"):
+                slot["drop_packets"] += int(counter.get("packets", 0))
+                slot["drop_bytes"] += int(counter.get("bytes", 0))
+    return {"chains": sorted(chains.values(), key=lambda c: (c["family"], c["table"], c["chain"]))}
+
+
+def cmd_denied() -> dict:
+    """Recent kernel netfilter denial log lines."""
+    try:
+        raw = run(["journalctl", "-k", "-n", "800", "-o", "short-iso",
+                   "--no-pager", "-q"])
+    except Exception as exc:
+        return {"events": [], "error": str(exc)}
+
+    events = []
+    for line in raw.splitlines():
+        match = DENIED_PATTERN.search(line)
+        if not match:
+            continue
+        fields = {}
+        for token in line.split():
+            if "=" in token:
+                key, _, value = token.partition("=")
+                fields[key] = value
+        events.append({
+            "stamp": line.split(" ", 1)[0],
+            "prefix": match.group(0),
+            "iface_in": fields.get("IN", ""),
+            "iface_out": fields.get("OUT", ""),
+            "src": fields.get("SRC", ""),
+            "dst": fields.get("DST", ""),
+            "proto": fields.get("PROTO", ""),
+            "sport": fields.get("SPT", ""),
+            "dport": fields.get("DPT", ""),
+            "raw": line,
+        })
+    return {"events": events}
+
+
+HANDLERS = {
+    "ping": cmd_ping,
+    "conntrack": cmd_conntrack,
+    "sockets": cmd_sockets,
+    "nft": cmd_nft,
+    "nft_counters": cmd_nft_counters,
+    "denied": cmd_denied,
+}
+
+
+def main() -> int:
+    if os.getuid() != 0:
+        sys.stderr.write("fwpanel-helper must run as root (launch it via pkexec)\n")
+        return 1
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        rid = request.get("id")
+        command = request.get("cmd")
+        handler = HANDLERS.get(command) if isinstance(command, str) else None
+        if handler is None:
+            reply = {"id": rid, "cmd": command, "ok": False,
+                     "error": f"unknown command {command!r}"}
+        else:
+            try:
+                reply = {"id": rid, "cmd": command, "ok": True, "data": handler()}
+            except Exception as exc:
+                reply = {"id": rid, "cmd": command, "ok": False,
+                         "error": f"{type(exc).__name__}: {exc}"}
+        try:
+            sys.stdout.write(json.dumps(reply) + "\n")
+            sys.stdout.flush()
+        except BrokenPipeError:
+            return 0
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(0)

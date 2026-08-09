@@ -1,0 +1,11 @@
+#!/usr/bin/python3
+"""Installed entry point for fwpanel."""
+
+import sys
+
+sys.path.insert(0, "/usr/lib/fwpanel")
+
+from fwpanel.app import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

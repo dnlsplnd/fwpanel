@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<policyconfig>
+
+  <vendor>Firewall Panel</vendor>
+  <vendor_url>https://github.com/local/fwpanel</vendor_url>
+  <icon_name>fwpanel</icon_name>
+
+  <action id="org.fwpanel.helper.read">
+    <description>Inspect connection tracking and the raw firewall ruleset</description>
+    <description xml:lang="sv">Granska anslutningsspårning och brandväggens regeluppsättning</description>
+    <message>Authentication is required to read the connection tracking table, the
+    compiled nftables ruleset, and socket ownership for all users.</message>
+    <message xml:lang="sv">Autentisering krävs för att läsa anslutningsspårningstabellen,
+    nftables-regeluppsättningen och socketägare för alla användare.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/fwpanel-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+</policyconfig>
