@@ -180,6 +180,10 @@ class LogsTab(QWidget):
         for line in chunk.splitlines():
             if line.strip():
                 self._ingest(line)
+        # journalctl delivers its whole backlog in one chunk, and the per-line
+        # scroll reset can lose that race; settle it once the batch is in.
+        if self.follow_check.isChecked():
+            self.raw.horizontalScrollBar().setValue(0)
 
     def _ingest(self, line: str) -> None:
         if self._paused:
@@ -202,9 +206,16 @@ class LogsTab(QWidget):
         else:
             self.raw.appendPlainText(line)
         if self.follow_check.isChecked() and at_bottom:
-            self.raw.moveCursor(QTextCursor.End)
-            # Following to the end also scrolls right to the end of the line;
-            # snap back so long kernel lines stay readable from the start.
+            # Appending parks the text cursor at the end of the line, and Qt
+            # keeps that cursor visible on every repaint - which drags the
+            # view right and hides the timestamp on these long kernel lines.
+            # Anchor the cursor to the start of the last line instead, then
+            # follow by scrolling the viewport.
+            cursor = self.raw.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            cursor.movePosition(QTextCursor.StartOfLine)
+            self.raw.setTextCursor(cursor)
+            scroll.setValue(scroll.maximum())
             self.raw.horizontalScrollBar().setValue(0)
 
     def _rebuild_raw(self) -> None:

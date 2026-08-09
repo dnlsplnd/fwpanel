@@ -77,9 +77,33 @@ Beyond the tab list:
   when firewalld is unreachable. The tooltip carries live throughput and
   connection counts.
 
+### Screenshots
+
+**Zones** — the full editor, with a Runtime / Permanent / Both selector and
+per-entry scope labels so drift is visible in place.
+
 ![Zones tab](docs/screenshots/zones.png)
 
+**Connections** — every socket, with process names, filters and a right-click
+route to a block rule. Listening sockets show `*` for the peer.
+
+![Connections tab](docs/screenshots/connections.png)
+
+**Traffic** — throughput, packet rate, errors and drops, connection counts,
+conntrack occupancy, socket states and top peers.
+
 ![Traffic tab](docs/screenshots/traffic.png)
+
+**Logs** — denied packets per second, a parsed denial table with the packet
+detail (length, TTL, TCP flags), and the raw journal beneath.
+
+![Logs tab](docs/screenshots/logs.png)
+
+> All addresses in these screenshots are mapped into the documentation ranges
+> reserved by [RFC 5737](https://www.rfc-editor.org/rfc/rfc5737) and
+> [RFC 3849](https://www.rfc-editor.org/rfc/rfc3849) (`192.0.2.0/24`,
+> `198.51.100.0/24`, `203.0.113.0/24`, `2001:db8::/32`), and MAC addresses into
+> the RFC 7042 documentation range. The output is otherwise real.
 
 ## Requirements
 
