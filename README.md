@@ -84,6 +84,12 @@ per-entry scope labels so drift is visible in place.
 
 ![Zones tab](docs/screenshots/zones.png)
 
+**Rules** — every rule in the firewall in one flat list, across all zones.
+`Reachable` separates rules that are live from those sitting in zones nothing
+is bound to.
+
+![Rules tab](docs/screenshots/rules.png)
+
 **Connections** — every socket, with process names, filters and a right-click
 route to a block rule. Listening sockets show `*` for the peer.
 
